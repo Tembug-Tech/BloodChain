@@ -1,0 +1,207 @@
+---
+- name: Deploy BloodChain Application
+  hosts: bloodchain_servers
+  become: yes
+  gather_facts: yes
+
+  vars:
+    DEPLOY_DIR: /opt/bloodchain
+    BACKUP_DIR: /var/backups/bloodchain
+    GIT_REPO: "https://github.com/yourusername/bloodchain.git"
+    GIT_BRANCH: main
+
+  pre_tasks:
+    - name: Create deployment backup
+      shell: |
+        if [ -d "{{ DEPLOY_DIR }}" ]; then
+          tar -czf {{ BACKUP_DIR }}/bloodchain-backup-$(date +%Y%m%d-%H%M%S).tar.gz {{ DEPLOY_DIR }}
+        fi
+      ignore_errors: yes
+
+  tasks:
+    - name: Clone or update BloodChain repository
+      git:
+        repo: "{{ GIT_REPO }}"
+        dest: "{{ DEPLOY_DIR }}"
+        version: "{{ GIT_BRANCH }}"
+        force: yes
+      become_user: "{{ ansible_user }}"
+
+    - name: Copy .env file to server
+      copy:
+        src: .env
+        dest: "{{ DEPLOY_DIR }}/.env"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0600'
+      when: ".env" is file
+      ignore_errors: yes
+
+    - name: Create .env file from template if not exists
+      template:
+        src: env.j2
+        dest: "{{ DEPLOY_DIR }}/.env"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0600'
+      when: ".env" is not file
+      ignore_errors: yes
+
+    - name: Create necessary directories
+      file:
+        path: "{{ DEPLOY_DIR }}/{{ item }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+      loop:
+        - staticfiles
+        - media
+        - logs
+
+    - name: Pull latest Docker images
+      shell: |
+        cd {{ DEPLOY_DIR }}
+        docker-compose pull
+      become_user: "{{ ansible_user }}"
+
+    - name: Start Docker containers
+      shell: |
+        cd {{ DEPLOY_DIR }}
+        docker-compose up -d
+      become_user: "{{ ansible_user }}"
+      register: docker_compose_up
+
+    - name: Display docker-compose output
+      debug:
+        msg: "{{ docker_compose_up.stdout }}"
+
+    - name: Wait for database to be ready
+      wait_for:
+        port: 5432
+        host: localhost
+        delay: 5
+        timeout: 60
+      ignore_errors: yes
+
+    - name: Run Django migrations
+      shell: |
+        cd {{ DEPLOY_DIR }}
+        docker-compose exec -T web python manage.py migrate
+      register: migration_output
+      retries: 3
+      delay: 10
+      until: migration_output.rc == 0
+
+    - name: Display migration output
+      debug:
+        msg: "{{ migration_output.stdout }}"
+
+    - name: Collect static files
+      shell: |
+        cd {{ DEPLOY_DIR }}
+        docker-compose exec -T web python manage.py collectstatic --noinput
+      register: collectstatic_output
+      ignore_errors: yes
+
+    - name: Create superuser (if needed)
+      shell: |
+        cd {{ DEPLOY_DIR }}
+        docker-compose exec -T web python manage.py shell << EOF
+        from django.contrib.auth.models import User
+        if not User.objects.filter(username='admin').exists():
+            User.objects.create_superuser('admin', 'admin@bloodchain.local', 'changeme123')
+            print("Superuser created: admin")
+        else:
+            print("Superuser admin already exists")
+        EOF
+      register: superuser_output
+      ignore_errors: yes
+
+    - name: Display superuser output
+      debug:
+        msg: "{{ superuser_output.stdout }}"
+
+    - name: Check application health
+      uri:
+        url: "http://localhost/api/donor/"
+        method: GET
+        status_code: [200, 401, 403]
+        validate_certs: no
+      register: health_check
+      retries: 5
+      delay: 10
+      until: health_check.status in [200, 401, 403]
+
+    - name: Display health check result
+      debug:
+        msg: |
+          ✓ Application health check passed
+          Status Code: {{ health_check.status }}
+
+    - name: Display Docker containers status
+      shell: docker-compose -f {{ DEPLOY_DIR }}/docker-compose.yml ps
+      register: container_status
+      become_user: "{{ ansible_user }}"
+
+    - name: Show container status
+      debug:
+        msg: "{{ container_status.stdout_lines }}"
+
+    - name: Configure Nginx reverse proxy
+      template:
+        src: nginx.conf.j2
+        dest: /etc/nginx/sites-available/bloodchain
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Enable Nginx site
+      file:
+        src: /etc/nginx/sites-available/bloodchain
+        dest: /etc/nginx/sites-enabled/bloodchain
+        state: link
+
+    - name: Test Nginx configuration
+      command: nginx -t
+      register: nginx_test
+
+    - name: Reload Nginx
+      systemd:
+        name: nginx
+        state: reloaded
+
+    - name: Display deployment completion
+      debug:
+        msg: |
+          ✓ BloodChain application deployed successfully!
+          
+          Deployment Details:
+          - Location: {{ DEPLOY_DIR }}
+          - Git Repo: {{ GIT_REPO }} ({{ GIT_BRANCH }} branch)
+          - Backup: {{ BACKUP_DIR }}
+          
+          Services Running:
+          {{ container_status.stdout }}
+          
+          Access Points:
+          - Application: http://{{ inventory_hostname }}
+          - Admin Panel: http://{{ inventory_hostname }}/admin
+          - API: http://{{ inventory_hostname }}/api/
+          
+          Next Steps:
+          1. Verify all services are running: docker-compose ps
+          2. Check logs: docker-compose logs -f
+          3. Change default superuser password
+          4. Configure DNS and SSL certificates
+
+  handlers:
+    - name: restart nginx
+      systemd:
+        name: nginx
+        state: restarted
+
+    - name: restart docker
+      systemd:
+        name: docker
+        state: restarted

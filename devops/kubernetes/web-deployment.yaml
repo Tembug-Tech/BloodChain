@@ -1,0 +1,149 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: bloodchain
+  labels:
+    app: web
+    tier: application
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: web
+      tier: application
+  template:
+    metadata:
+      labels:
+        app: web
+        tier: application
+    spec:
+      serviceAccountName: default
+      terminationGracePeriodSeconds: 30
+      containers:
+      - name: django
+        image: bloodchain:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        env:
+        # Database Configuration
+        - name: DB_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: bloodchain-config
+              key: DB_HOST
+        - name: DB_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: bloodchain-config
+              key: DB_PORT
+        - name: DB_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: bloodchain-config
+              key: DB_NAME
+        - name: DB_USER
+          valueFrom:
+            configMapKeyRef:
+              name: bloodchain-config
+              key: DB_USER
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: bloodchain-secret
+              key: DB_PASSWORD
+        # Redis Configuration
+        - name: REDIS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: bloodchain-config
+              key: REDIS_URL
+        # Django Configuration
+        - name: DJANGO_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: bloodchain-secret
+              key: DJANGO_SECRET_KEY
+        - name: DJANGO_DEBUG
+          valueFrom:
+            configMapKeyRef:
+              name: bloodchain-config
+              key: DJANGO_DEBUG
+        - name: DJANGO_LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: bloodchain-config
+              key: DJANGO_LOG_LEVEL
+        - name: ALLOWED_HOSTS
+          valueFrom:
+            configMapKeyRef:
+              name: bloodchain-config
+              key: ALLOWED_HOSTS
+        - name: CORS_ALLOWED_ORIGINS
+          valueFrom:
+            configMapKeyRef:
+              name: bloodchain-config
+              key: CORS_ALLOWED_ORIGINS
+        # Web3 Configuration
+        - name: WEB3_PROVIDER_URI
+          valueFrom:
+            configMapKeyRef:
+              name: bloodchain-config
+              key: WEB3_PROVIDER_URI
+        - name: WEB3_CONTRACT_ADDRESS
+          valueFrom:
+            configMapKeyRef:
+              name: bloodchain-config
+              key: WEB3_CONTRACT_ADDRESS
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /api/donor/
+            port: 8000
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /api/donor/
+            port: 8000
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        securityContext:
+          runAsNonRoot: false
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - web
+              topologyKey: kubernetes.io/hostname

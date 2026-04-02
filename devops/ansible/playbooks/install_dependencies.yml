@@ -1,0 +1,187 @@
+---
+- name: Install BloodChain Dependencies
+  hosts: bloodchain_servers
+  become: yes
+  gather_facts: yes
+
+  vars:
+    ubuntu_version: "24.04"
+    docker_compose_version: "v2.24.0"
+    python_version: "3.11"
+
+  tasks:
+    - name: Update system packages
+      apt:
+        update_cache: yes
+        upgrade: dist
+        cache_valid_time: 3600
+
+    - name: Install required system packages
+      apt:
+        name:
+          - build-essential
+          - curl
+          - wget
+          - git
+          - software-properties-common
+          - apt-transport-https
+          - ca-certificates
+          - gnupg
+          - lsb-release
+          - vim
+          - htop
+          - net-tools
+          - unzip
+        state: present
+
+    - name: Install Python 3.11
+      apt:
+        name:
+          - python3.11
+          - python3.11-venv
+          - python3.11-dev
+          - python3-pip
+        state: present
+
+    - name: Set Python 3.11 as default
+      alternatives:
+        name: python3
+        path: /usr/bin/python3.11
+        link: /usr/bin/python3
+        priority: 100
+
+    - name: Upgrade pip
+      pip:
+        name:
+          - pip
+          - setuptools
+          - wheel
+        state: latest
+        executable: /usr/bin/python3.11
+
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker APT repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable"
+        state: present
+
+    - name: Install Docker
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        state: present
+        update_cache: yes
+
+    - name: Start Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add ubuntu user to docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    - name: Install Docker Compose
+      get_url:
+        url: "https://github.com/docker/compose/releases/download/{{ docker_compose_version }}/docker-compose-Linux-x86_64"
+        dest: /usr/local/bin/docker-compose
+        mode: '0755'
+
+    - name: Create docker-compose symlink
+      file:
+        src: /usr/local/bin/docker-compose
+        dest: /usr/bin/docker-compose
+        state: link
+
+    - name: Verify Docker Compose installation
+      command: docker-compose --version
+      register: docker_compose_version_output
+
+    - name: Display Docker Compose version
+      debug:
+        msg: "{{ docker_compose_version_output.stdout }}"
+
+    - name: Install PostgreSQL client
+      apt:
+        name:
+          - postgresql-client
+          - postgresql-contrib
+        state: present
+
+    - name: Install Redis
+      apt:
+        name:
+          - redis-server
+        state: present
+
+    - name: Start Redis service
+      systemd:
+        name: redis-server
+        state: started
+        enabled: yes
+
+    - name: Install Nginx
+      apt:
+        name:
+          - nginx
+        state: present
+
+    - name: Start Nginx service
+      systemd:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Create BloodChain application directory
+      file:
+        path: "{{ DEPLOY_DIR }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: Create backup directory
+      file:
+        path: "{{ BACKUP_DIR }}"
+        state: directory
+        mode: '0755'
+
+    - name: Install additional Python packages for deployment
+      pip:
+        name:
+          - python-dotenv
+          - psycopg2-binary
+        state: present
+        executable: /usr/bin/python3.11
+
+    - name: Verify Docker installation
+      command: docker --version
+      register: docker_version_output
+
+    - name: Display Docker version
+      debug:
+        msg: "{{ docker_version_output.stdout }}"
+
+    - name: Display installation completion message
+      debug:
+        msg: |
+          ✓ All dependencies installed successfully
+          - Python 3.11
+          - Docker {{ docker_version_output.stdout }}
+          - Docker Compose {{ docker_compose_version_output.stdout }}
+          - PostgreSQL client
+          - Redis
+          - Nginx
+          
+          Next steps:
+          1. Configure .env file
+          2. Run deploy_app.yml playbook
